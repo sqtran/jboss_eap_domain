@@ -1,0 +1,329 @@
+---
+- name: Play for all machines
+  hosts: cluster
+  become : true
+  tasks:
+
+    - name: Stop and disable eap7-standalone.service
+      service:
+        name: eap7-standalone
+        state: stopped
+        enabled: no
+
+    - name: Stop eap7-domain.service
+      service:
+        name: eap7-domain
+        state: stopped
+
+# Example: Install any drivers/jars as JBoss modules
+
+#    - name: Install Oracle JDBC Driver as a JBoss Module
+#      copy:
+#        src:  /path/to/module
+#        dest: "{{jboss_home}}/modules/com/" 
+#    
+#    - name: Install EclipseLink dependency as a JBoss Module
+#      copy:
+#        src:  /path/to/module
+#        dest: "{{jboss_home}}/modules/org/" 
+    
+
+
+# Example : Add a management user named "jboss" with password "jboss4od"
+    - name: Add jboss user to users properties file
+      lineinfile:
+        path: "{{jboss_home}}/domain/configuration/mgmt-users.properties"
+        line: "jboss=d3017fe413307157e3a6a91868a85c57"
+        create: yes
+
+# Example : Add a credential for a remote host controller to connect to a domain controller 
+    - name: Add {{host_controller_credential}} user to users properties file
+      shell: "{{jboss_home}}/bin/add-user.sh {{host_controller_credential}} {{host_controller_credential_password}}"
+ 
+    
+    - name: Add jboss user to group properties file
+      lineinfile:
+        path: "{{jboss_home}}/domain/configuration/mgmt-groups.properties"
+        line: 'jboss=Admin, Administrator'
+        create: yes
+
+    - name: Check to see if application.keystore already exists
+      stat:
+        path: "{{jboss_home}}/{{keystore_path}}"
+      register: application_keystore
+    
+    - name: Generate keypair and store it into application.keystore
+      shell:  (echo password & echo password) | keytool -genkeypair -alias jboss -keyalg RSA -keystore {{jboss_home}}/{{keystore_path}} -storepass password --dname "CN=localhost,OU=jboss,O=example.com,L=Washington,S=DC,C=US" -ext san=dns:{{inventory_hostname}}
+      when: application_keystore.stat.exists == false
+
+
+- name: Play specific for the Domain Controller
+  hosts: dc
+  become: true
+  tasks:
+    - name: Remove unnecessary host-slave files
+      file:
+        state: absent
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+      loop:
+        - host-slave.xml
+        - host-master.xml
+
+    - name: Remove unnecessary default server-groups from domain controller
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:domain/a:server-groups/a:server-group[@name=\"other-server-group\"]"
+        state: absent
+        pretty_print: true
+      loop:
+        - "domain.xml"
+
+    - name: Remove unnecessary default servers from the master's host controller
+      xml:
+        path: "{{jboss_home}}/domain/configuration/host.xml"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:host/a:servers/a:server[@name=\"{{item}}\"]"
+        state: absent
+        pretty_print: true
+      loop:
+        - server-two
+        - server-three
+
+    - name: Set main-server-group to use default profiile
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:domain/a:server-groups/a:server-group[@name=\"main-server-group\"]"
+        attribute: profile
+        value: default
+        pretty_print: true
+      loop:
+        - "domain.xml"
+
+    - name: Set main-server-group to use standard sockets
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:domain/a:server-groups/a:server-group[@name=\"main-server-group\"]/a:socket-binding-group"
+        attribute: ref
+        value: standard-sockets
+        pretty_print: true
+      loop:
+        - "domain.xml"
+
+    - name: Increase default minimum JVM heap size
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:domain/a:server-groups/a:server-group[@name=\"main-server-group\"]/a:jvm[@name=\"default\"]/a:heap"
+        attribute: size
+        value: 2048m
+        pretty_print: true
+      loop:
+        - "domain.xml"
+
+    - name: Increase default maximum JVM heap size
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:domain/a:server-groups/a:server-group[@name=\"main-server-group\"]/a:jvm[@name=\"default\"]/a:heap"
+        attribute: max-size
+        value: 6144m
+        pretty_print: true
+      loop:
+         - "domain.xml"
+ 
+    - name: Bind networking to all interfaces
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: jboss\.bind\.address:127\.0\.0\.1
+        replace: jboss.bind.address:0.0.0.0
+      loop: 
+        - "domain.xml"
+        - "host.xml"
+    
+    - name: Bind management networking to all interfaces
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: jboss\.bind\.address\.management:127\.0\.0\.1
+        replace: jboss.bind.address.management:0.0.0.0
+      loop: 
+        - "domain.xml"
+        - "host.xml"
+
+    - name: Configure SSL on master
+      replace:
+        path: "{{jboss_home}}/domain/configuration/host.xml"
+        regexp: "keystore path=\"application.keystore\" relative-to=\"jboss.domain.config.dir\" keystore-password=\"password\" alias=\"server\" key-password=\"password\" generate-self-signed-certificate-host=\"localhost\""
+        replace: "keystore path=\"application.keystore\" relative-to=\"jboss.domain.config.dir\" keystore-password=\"password\" alias=\"jboss\""
+
+# Example : Assumes ODJBC Module was installed, then sets up datasources driver to reference Oracle Jar.
+#    - name: Check if we need to install the Oracle Driver into default profile
+#      xml:
+#        path: "{{config_path}}"
+#        namespaces:
+#          a: urn:jboss:domain:5.0
+#          b: urn:jboss:domain:datasources:5.0
+#        xpath: "/a:domain/a:profiles/a:profile[@name=\"default\"]/b:subsystem/b:datasources/b:drivers/b:driver[@name=\"oracle\"]"
+#        count: true
+#      register: driver_status
+#
+#    - name: Install Oracle JBDC driver into Datasource stanza
+#      xml:
+#        path: "{{config_path}}"
+#        namespaces:
+#          a: urn:jboss:domain:5.0
+#          b: urn:jboss:domain:datasources:5.0
+#        xpath: "/a:domain/a:profiles/a:profile[@name=\"default\"]/b:subsystem/b:datasources/b:drivers"
+#        pretty_print: yes
+#        add_children: 
+#          - driver: 
+#              name: oracle
+#              module: com.oracle
+#              _ : 
+#                - xa-datasource-class: oracle.jdbc.xa.client.OracleXADataSource
+#      when: driver_status.count == 0
+
+- name: Play specific to the Host Controller(s)
+  hosts: hc
+  become: true
+  tasks:
+    - name: Remove unnecessary domain.xml and host.xml files from Host Controller
+      file:
+        state: absent
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+      loop:
+        - host-master.xml
+        - domain.xml
+        - host.xml
+
+    - name: Remove unnecessary default servers from host controller
+      xml:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        namespaces:
+          a: urn:jboss:domain:5.0
+        xpath: "/a:host/a:servers/a:server[@name=\"server-two\"]"
+        state: absent
+        pretty_print: true
+      loop: 
+        - "host-slave.xml"
+
+    - name: Bind networking to all interfaces
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: jboss\.bind\.address:127\.0\.0\.1
+        replace: jboss.bind.address:0.0.0.0
+      loop: 
+        - "host-slave.xml"
+    
+    - name: Bind management networking to all interfaces
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: jboss\.bind\.address\.management:127\.0\.0\.1
+        replace: jboss.bind.address.management:0.0.0.0
+      loop: 
+        - "host-slave.xml"
+
+    - name: Bind domain controlller
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: \$\{jboss\.domain\.master\.address\}
+        replace: "{{groups['dc'][0]}}"
+      loop: 
+        - "host-slave.xml"
+
+#    - name: Set Host Controller Name to {{inventory_hostname_short}}
+#      replace:
+#        path: "{{jboss_home}}/domain/configuration/{{item}}"
+#        regexp: \<host xmlns="urn:jboss:domain:5\.0"\>
+#        replace: "<host xmlns=\"urn:jboss:domain:5.0\" name=\"{{inventory_hostname_short}}\">"
+#      loop:
+#        - "host-slave.xml"
+
+    - name: Set access token for host controller(s) to connect to domain controller
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: c2xhdmVfdXMzcl9wYXNzd29yZA==
+        replace: amJvc3M0b2Q=
+      loop: 
+        - "host-slave.xml"
+
+    - name: Set remote-username for slaves to connect to domain controller
+      replace:
+        path: "{{jboss_home}}/domain/configuration/{{item}}"
+        regexp: <remote security-realm="ManagementRealm">
+        replace: <remote security-realm="ManagementRealm" username="{{host_controller_credential}}">
+      loop: 
+        - "host-slave.xml"
+
+    - name: Configure domain.conf to point to host-slave.xml
+      blockinfile:
+        path: "{{jboss_home}}/bin/domain.conf"
+        block: |
+          if [ "x$SERVER_OPTS" = "x" ]; then
+              SERVER_OPTS="$SERVER_OPTS --host-config host-slave.xml"
+          fi
+
+    - name: Configure systemd service unit to point to host-slave.xml
+      replace:
+        path: "/usr/lib/systemd/system/eap7-domain.service"
+        regexp: "Environment=\"WILDFLY_HOST_CONFIG=\""
+        replace: "Environment=\"WILDFLY_HOST_CONFIG=host-slave.xml\""
+
+    - name: Reload the systemd daemon after any changes to service units
+      systemd:
+        daemon_reload: yes
+        name: eap7-domain.service
+
+    - name: Configure SSL on hosts
+      replace:
+        path: "{{jboss_home}}/domain/configuration/host-slave.xml"
+        regexp: "keystore path=\"application.keystore\" relative-to=\"jboss.domain.config.dir\" keystore-password=\"password\" alias=\"server\" key-password=\"password\" generate-self-signed-certificate-host=\"localhost\""
+        replace: "keystore path=\"application.keystore\" relative-to=\"jboss.domain.config.dir\" keystore-password=\"password\" alias=\"jboss\""
+
+
+- name: Play to start domain controller
+  hosts: dc
+  become: true
+  tasks:
+    - name: "Start eap7-domain.service on {{inventory_hostname}}"
+      service:
+        name: eap7-domain
+        state: started
+        enabled: yes
+
+    - name: "Wait for {{inventory_hostname}} to come online"
+      uri:
+        url: "http://{{inventory_hostname}}:8080"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 10
+      delay: 3
+
+- name: Play to start host controller(s)
+  hosts: hc
+  become: true
+  tasks:
+    - name: "Start eap7-domain.service on {{inventory_hostname}}"
+      service:
+        name: eap7-domain
+        state: started
+        enabled: yes
+
+    - name: "Wait for {{inventory_hostname}} to come online"
+      uri:
+        url: "http://{{inventory_hostname}}:8080"
+        status_code: 200
+      register: result
+      until: result.status == 200
+      retries: 10
+      delay: 3
+...
