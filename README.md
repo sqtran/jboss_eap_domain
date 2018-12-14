@@ -1,5 +1,5 @@
 # jboss_eap_domain
-An Ansible role used for configuring EAP in Domain mode.
+An Ansible Playbook used for customizing EAP in Domain mode.
 
 ## Disclaimer
 - This playbook assumes that EAP is already installed in the default locations, which also assumes that it was installed on RHEL/Centos via YUM.
